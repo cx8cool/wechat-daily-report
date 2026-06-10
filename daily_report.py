@@ -67,7 +67,7 @@ def save_state(state):
 # ── Data fetchers ─────────────────────────────────────────────────────────────
 
 def get_new_contacts(state):
-    """Contacts added since last run, tracked by max contact id."""
+    """Contacts added since last run (today's new), tracked by max contact id."""
     data = run_sql(
         "SELECT id, username, nick_name, alias, remark FROM contact "
         "WHERE local_type=1 AND delete_flag=0 ORDER BY id DESC LIMIT 100",
@@ -83,12 +83,24 @@ def get_new_contacts(state):
     max_id = max(r["id"] for r in rows)
     last_id = state.get("last_max_contact_id", 0)
 
-    # Skip official accounts (username starts with gh_)
     new = [r for r in rows
            if r["id"] > last_id
            and not any(str(r.get("username","")).startswith(p) for p in OFFICIAL_PREFIXES)]
 
     return new, max_id
+
+
+def get_recent_contacts(limit=20):
+    """Most recently added contacts by id (regardless of last-run state)."""
+    data = run_sql(
+        f"SELECT id, username, nick_name, alias, remark FROM contact "
+        f"WHERE local_type=1 AND delete_flag=0 ORDER BY id DESC LIMIT {limit}",
+        "contact", "contact.db"
+    )
+    if not data:
+        return []
+    return [r for r in data.get("rows", [])
+            if not any(str(r.get("username","")).startswith(p) for p in OFFICIAL_PREFIXES)]
 
 
 def get_private_sessions(limit=200):
@@ -126,6 +138,18 @@ def get_message_history(chat_name, days_back=1):
 
 def get_group_messages(group_name, days_back=1):
     return get_message_history(group_name, days_back)
+
+
+def get_memo_messages(days_back=30):
+    """Fetch messages from 文件传输助手 (filehelper), used as personal memo."""
+    # filehelper is the real username for 文件传输助手 / 美女的备忘录
+    for name in ("filehelper", "美女的备忘录"):
+        data = run_cli("history", name, "--limit", "60")
+        if data and data.get("messages"):
+            msgs = data["messages"]
+            cutoff = (datetime.now() - timedelta(days=days_back)).timestamp()
+            return [m for m in msgs if (m.get("timestamp") or 0) >= cutoff or not m.get("timestamp")]
+    return []
 
 
 # ── AI analysis ───────────────────────────────────────────────────────────────
@@ -261,6 +285,48 @@ def summarize_group(messages, group_name, api_key):
     return summary, keywords
 
 
+def summarize_memo(messages, api_key):
+    """Extract structured reminders from personal notes chat."""
+    if not messages or not api_key:
+        return None
+    lines = []
+    for m in messages:
+        content = m.get("content") or m.get("text") or m.get("summary") or ""
+        if content and content.strip():
+            lines.append(content.strip()[:300])
+    if not lines:
+        return None
+
+    raw = claude(
+        f"""以下是我的微信备忘录（我给自己发的消息，记录日程、提醒、重要事项）：
+
+{chr(10).join(f'- {l}' for l in lines)}
+
+请提取并输出以下JSON（严格JSON，不要其他文字）：
+{{
+  "dates": [{{"text": "描述", "date": "日期或时间"}}],
+  "people": [{{"name": "人名", "note": "关于此人的备忘"}}],
+  "todos": ["待办事项1", "待办事项2"],
+  "notes": ["其他重要备忘1", "其他重要备忘2"]
+}}
+
+dates：含具体日期/时间的事项；people：提到具体人名的备忘；todos：需要做的事；notes：其他重要信息。
+如某类为空则返回空数组。""",
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        api_key=api_key
+    )
+    if not raw:
+        return None
+    try:
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except Exception:
+        pass
+    return None
+
+
 # ── Formatting helpers ────────────────────────────────────────────────────────
 
 def fmt_time(ts):
@@ -288,99 +354,149 @@ def trunc(s, n=60):
 
 # ── HTML builder ─────────────────────────────────────────────────────────────
 
-def build_html(config, new_contacts, unanswered, all_private, analysis):
+def build_html(config, new_contacts, unanswered, all_private, analysis, recent_contacts=None):
     now      = datetime.now()
     title    = config.get("report_title", "微信私信日报")
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M")
     weekday  = ["周一","周二","周三","周四","周五","周六","周日"][now.weekday()]
 
-    # ── Recent private chats (timeline, sorted by last activity) ─────────
+    # ── Unanswered section ────────────────────────────────────────────────
+    ua_rows = ""
+    for s in unanswered:
+        name = esc(s.get("display_name") or "?")
+        msg  = esc(trunc(s.get("summary", ""), 40))
+        t    = fmt_time(s.get("last_timestamp"))
+        cnt  = s.get("unread_count", 0)
+        ua_rows += f"""<div class="ua-row">
+          <div class="av av-r">{name[:1]}</div>
+          <div class="ua-body">
+            <div class="ua-name">{name}<span class="badge">{cnt}</span></div>
+            <div class="ua-msg">{msg or "等待你回复"}</div>
+          </div>
+          <span class="ua-time">{t}</span>
+        </div>"""
+
+    # ── New contacts section ──────────────────────────────────────────────
+    nc_rows = ""
+    for c in new_contacts:
+        name   = esc(c.get("nick_name") or c.get("alias") or c.get("username","?"))
+        remark = esc(c.get("remark") or c.get("alias") or "")
+        nc_rows += f"""<div class="nc-row">
+          <div class="av av-g">{name[:1]}</div>
+          <div class="ua-body">
+            <div class="ua-name">{name}</div>
+            {"<div class='ua-msg'>"+remark+"</div>" if remark else ""}
+          </div>
+          <span class="tag-new">新</span>
+        </div>"""
+
+    # ── Card: AI 核心判断 ─────────────────────────────────────────────────
+    ai_items = ""
+    ai_footer = "跟进建议"
+    if analysis:
+        has_urgent = False
+        for x in analysis.get("must_followup", [])[:4]:
+            urg = x.get("urgency","")
+            dc = "#E8393A" if urg == "high" else "#F59F00"
+            bc = "#FFF1F1" if urg == "high" else "#FFFBEC"
+            if urg == "high": has_urgent = True
+            ai_items += f"""<div class="ci">
+              <div class="ci-dot" style="background:{dc}"></div>
+              <div class="ci-body">
+                <div class="ci-name">{esc(x.get('name',''))}</div>
+                <div class="ci-desc" style="background:{bc}">{esc(trunc(x.get('reason','') or x.get('action',''), 46))}</div>
+              </div>
+            </div>"""
+        for x in analysis.get("warming_up", [])[:3]:
+            ai_items += f"""<div class="ci">
+              <div class="ci-dot" style="background:#1B6EF3"></div>
+              <div class="ci-body">
+                <div class="ci-name">{esc(x.get('name',''))}</div>
+                <div class="ci-desc" style="background:#EEF3FF">{esc(trunc(x.get('signal',''), 46))}</div>
+              </div>
+            </div>"""
+        if has_urgent: ai_footer = "风险"
+        if not ai_items and analysis.get("summary"):
+            ai_items = f'<div class="ci-summary">{esc(analysis["summary"])}</div>'
+    if not ai_items:
+        ai_items = '<div class="c-empty">配置 Anthropic Key 后启用 AI 分析</div>'
+
+    # ── Card: 时间故事线 ──────────────────────────────────────────────────
     recent_private = sorted(
         [s for s in all_private if s.get("last_timestamp")],
         key=lambda x: x["last_timestamp"], reverse=True
-    )[:18]
-
-    tl_rows = ""
+    )[:15]
     unanswered_ids = {s.get("username") for s in unanswered}
+
+    tl_items = ""
     for s in recent_private:
         name    = esc(s.get("display_name") or s.get("username", "?"))
-        msg     = esc(trunc(s.get("summary", ""), 42))
+        msg     = esc(trunc(s.get("summary", ""), 34))
         t       = fmt_time(s.get("last_timestamp"))
-        cnt     = s.get("unread_count", 0)
         waiting = s.get("username") in unanswered_ids
-        dot     = "dot-red" if waiting else "dot-gray"
-        cnt_html = f'<span class="badge">{cnt}</span>' if cnt else ""
-        tl_rows += f"""<div class="tl-row">
-          <div class="tl-meta">
-            <span class="tl-time">{t}</span>
-            <span class="{dot}"></span>
+        cnt     = s.get("unread_count", 0)
+        dot_cls = "tl-dot-red" if waiting else "tl-dot-gray"
+        badge   = f'<span class="badge">{cnt}</span>' if cnt else ""
+        tl_items += f"""<div class="tl-item">
+          <div class="tl-left">
+            <span class="tl-t">{t}</span>
+            <span class="{dot_cls}"></span>
+            <span class="tl-line"></span>
           </div>
           <div class="tl-body">
-            <div class="tl-name">{name}{cnt_html}</div>
+            <div class="tl-name">{name}{badge}</div>
             <div class="tl-msg">{msg}</div>
           </div>
         </div>"""
+    if not tl_items:
+        tl_items = '<div class="c-empty">暂无私聊数据</div>'
 
-    # ── Right col: new contacts ───────────────────────────────────────────
-    nc_html = ""
-    for c in new_contacts[:6]:
-        name  = esc(c.get("nick_name") or c.get("alias") or c.get("username", "?"))
-        alias = esc(c.get("alias") or "")
-        nc_html += f"""<div class="r-row">
+    # ── Card: 最近新联系人 ────────────────────────────────────────────────
+    rc_items = ""
+    for c in (recent_contacts or []):
+        name   = esc(c.get("nick_name") or c.get("alias") or c.get("username","?"))
+        remark = esc(c.get("remark") or "")
+        alias  = esc(c.get("alias") or "")
+        sub    = remark or alias
+        # mark today's new contacts with a badge
+        is_new = c in new_contacts
+        badge  = '<span class="tag-new">今日新增</span>' if is_new else ""
+        rc_items += f"""<div class="nc-item">
           <div class="av av-g">{name[:1]}</div>
-          <div class="r-body">
-            <div class="r-name">{name}</div>
-            {"<div class='r-sub'>@"+alias+"</div>" if alias else ""}
+          <div class="ua-body">
+            <div class="ua-name">{name}{badge}</div>
+            {"<div class='ua-msg'>"+sub+"</div>" if sub else ""}
           </div>
-          <span class="tag tag-g">新</span>
         </div>"""
-    if not nc_html:
-        nc_html = '<div class="r-empty">今日暂无新联系人</div>'
+    if not rc_items:
+        rc_items = '<div class="c-empty">暂无联系人数据</div>'
 
-    # ── Right col: unanswered ─────────────────────────────────────────────
-    ua_html = ""
-    for s in unanswered[:6]:
-        name = esc(s.get("display_name") or "?")
-        msg  = esc(trunc(s.get("summary", ""), 34))
-        t    = fmt_time(s.get("last_timestamp"))
-        cnt  = s.get("unread_count", 0)
-        ua_html += f"""<div class="r-row">
-          <div class="av av-r">{name[:1]}</div>
-          <div class="r-body">
-            <div class="r-name">{name} <span class="badge">{cnt}</span></div>
-            <div class="r-sub">{msg}</div>
-          </div>
-          <span class="r-time">{t}</span>
-        </div>"""
-    if not ua_html:
-        ua_html = '<div class="r-empty">✓ 全部已回复</div>'
+    # ── Render ────────────────────────────────────────────────────────────
+    ua_count   = len(unanswered)
+    nc_count   = len(new_contacts)
+    ua_section = f"""
+    <div class="alert-card">
+      <div class="alert-hdr">
+        <div class="alert-left">
+          <span class="alert-num">{ua_count}</span>
+          <span class="alert-label">条未回复</span>
+        </div>
+        <div class="card-icon icon-red">🔔</div>
+      </div>
+      <div class="alert-body">{"".join(f'<div class="ua-row"><div class="av av-r">{esc((s.get("display_name") or "?")[:1])}</div><div class="ua-body"><div class="ua-name">{esc(s.get("display_name") or "?")}<span class="badge">{s.get("unread_count",0)}</span></div><div class="ua-msg">{esc(trunc(s.get("summary",""),38))}</div></div><span class="ua-time">{fmt_time(s.get("last_timestamp"))}</span></div>' for s in unanswered)}</div>
+      <div class="card-ftr"><div class="ftr-dot" style="background:#E8393A"></div><span class="ftr-label" style="color:#E8393A">待回复</span></div>
+    </div>""" if ua_count else ""
 
-    # ── Right col: AI important ───────────────────────────────────────────
-    ai_rows = ""
-    if analysis:
-        items = []
-        for x in analysis.get("must_followup", [])[:3]:
-            items.append(("red", x.get("name",""), x.get("reason","") or x.get("action","")))
-        for x in analysis.get("warming_up", [])[:3]:
-            items.append(("blue", x.get("name",""), x.get("signal","")))
-        for i, (color, name, desc) in enumerate(items):
-            c = {"red":"#F03D3D","blue":"#1B6EF3"}.get(color,"#888")
-            bg = {"red":"#FFF0F0","blue":"#EEF3FF"}.get(color,"#F5F5F7")
-            ai_rows += f"""<div class="ai-row">
-              <div class="ai-num" style="color:{c};background:{bg}">{i+1}</div>
-              <div class="r-body">
-                <div class="r-name">{esc(name)}</div>
-                <div class="r-sub">{esc(trunc(desc,38))}</div>
-              </div>
-            </div>"""
-        if analysis.get("summary"):
-            ai_summary = f'<div class="ai-bar">{esc(analysis["summary"])}</div>'
-        else:
-            ai_summary = ""
-    else:
-        ai_rows = '<div class="r-empty">填写 Anthropic Key 启用 AI 分析</div>'
-        ai_summary = ""
+    nc_section = f"""
+    <div class="nc-card">
+      <div class="card-hdr">
+        <span class="card-title">昨日新添加</span>
+        <div class="card-icon icon-green">👋</div>
+      </div>
+      <div class="card-body">{nc_rows}</div>
+      <div class="card-ftr"><div class="ftr-dot" style="background:#1CB47A"></div><span class="ftr-label" style="color:#1CB47A">新联系人</span></div>
+    </div>""" if nc_count else ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -391,125 +507,187 @@ def build_html(config, new_contacts, unanswered, all_private, analysis):
 <style>
 *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;
-  background:#FAFAFA;color:#111;font-size:14px;min-height:100vh}}
+  background:#F2F2F7;color:#111;font-size:14px}}
 
 /* ── Header ── */
-.hdr{{background:#fff;border-bottom:1px solid #EBEBEB;padding:20px 28px 16px}}
-.hdr-brand{{font-size:11px;font-weight:700;color:#999;letter-spacing:.8px;text-transform:uppercase}}
-.hdr-date{{font-size:24px;font-weight:800;color:#111;line-height:1.1;margin:4px 0}}
-.hdr-stats{{display:flex;gap:20px;margin-top:10px}}
-.hs{{display:flex;align-items:baseline;gap:4px}}
-.hs-n{{font-size:17px;font-weight:800;color:#111}}
-.hs-n.red{{color:#E02020}}
-.hs-n.green{{color:#1CB47A}}
-.hs-l{{font-size:11px;color:#999}}
-.hdr-time{{font-size:11px;color:#bbb;margin-top:8px}}
+.hdr{{background:#fff;padding:24px 28px 20px;border-bottom:1px solid #E5E5EA}}
+.hdr-top{{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}}
+.hdr-date{{font-size:22px;font-weight:800;color:#111}}
+.hdr-day{{font-size:15px;color:#999;margin-left:10px;font-weight:400}}
+.hdr-time{{font-size:12px;color:#C0C0C6}}
+.hdr-stats{{display:flex;gap:32px}}
+.hs{{display:flex;flex-direction:column;gap:2px}}
+.hs-n{{font-size:42px;font-weight:900;line-height:1;letter-spacing:-1px}}
+.hs-n.clr-red{{color:#E8393A}}
+.hs-n.clr-green{{color:#1CB47A}}
+.hs-n.clr-gray{{color:#3C3C43}}
+.hs-l{{font-size:12px;color:#8E8E93;font-weight:500}}
+.hs-divider{{width:1px;background:#E5E5EA;align-self:stretch;margin:4px 0}}
 
-/* ── Layout ── */
-.page{{display:grid;grid-template-columns:1fr 340px;min-height:calc(100vh - 110px)}}
-@media(max-width:680px){{.page{{grid-template-columns:1fr}}}}
+/* ── Page wrapper ── */
+.page{{max-width:980px;margin:0 auto;padding:12px}}
 
-/* ── Left: timeline ── */
-.tl{{padding:20px 24px;border-right:1px solid #EBEBEB;background:#fff}}
-.col-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
-  color:#bbb;margin-bottom:16px}}
+/* ── Alert card (待回复) ── */
+.alert-card{{background:#fff;border-radius:16px;overflow:hidden;margin-bottom:12px;
+  border:1.5px solid #FFDCDC;
+  box-shadow:0 2px 8px rgba(232,57,58,.10)}}
+.alert-hdr{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 8px}}
+.alert-left{{display:flex;align-items:baseline;gap:8px}}
+.alert-num{{font-size:36px;font-weight:900;color:#E8393A;line-height:1}}
+.alert-label{{font-size:15px;font-weight:700;color:#E8393A}}
+.alert-body{{padding:0 16px 4px}}
 
-.tl-row{{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #F5F5F5}}
-.tl-row:last-child{{border-bottom:none}}
-.tl-meta{{display:flex;flex-direction:column;align-items:center;gap:5px;
-  width:46px;flex-shrink:0;padding-top:2px}}
-.tl-time{{font-size:10px;color:#bbb;white-space:nowrap}}
-.dot-red{{width:7px;height:7px;border-radius:50%;background:#E02020;flex-shrink:0}}
-.dot-gray{{width:7px;height:7px;border-radius:50%;background:#D1D1D6;flex-shrink:0}}
+/* ── New contacts card ── */
+.nc-card{{background:#fff;border-radius:16px;overflow:hidden;margin-bottom:12px;
+  border:1.5px solid #D4F5E9;
+  box-shadow:0 2px 8px rgba(28,180,122,.08)}}
+
+/* ── 2×2 grid ── */
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+@media(max-width:620px){{.grid{{grid-template-columns:1fr}}}}
+
+/* ── Card ── */
+.card{{background:#fff;border-radius:16px;overflow:hidden;
+  box-shadow:0 1px 3px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.04)}}
+.card-hdr{{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 8px}}
+.card-title{{font-size:15px;font-weight:700;color:#111}}
+.card-icon{{width:34px;height:34px;border-radius:10px;display:flex;
+  align-items:center;justify-content:center;font-size:17px}}
+.icon-green{{background:#E8FAF2}} .icon-blue{{background:#E8F0FF}}
+.icon-orange{{background:#FFF4E8}} .icon-purple{{background:#F3EEFF}}
+.icon-red{{background:#FFECEC}}
+.card-body{{padding:0 16px 4px;min-height:70px}}
+.card-ftr{{display:flex;align-items:center;gap:6px;
+  padding:10px 16px;border-top:1px solid #F2F2F7;margin-top:6px}}
+.ftr-dot{{width:6px;height:6px;border-radius:50%}}
+.ftr-label{{font-size:12px;font-weight:600}}
+.c-empty{{font-size:12px;color:#bbb;padding:14px 0;font-style:italic}}
+
+/* ── Rows shared ── */
+.ua-row,.nc-row{{display:flex;align-items:center;gap:10px;padding:9px 0;
+  border-bottom:1px solid #F5F5F5}}
+.ua-row:last-child,.nc-row:last-child{{border-bottom:none}}
+.av{{width:32px;height:32px;border-radius:50%;flex-shrink:0;font-size:13px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;color:#fff}}
+.av-r{{background:linear-gradient(135deg,#E8393A,#FF6B6B)}}
+.av-g{{background:linear-gradient(135deg,#1CB47A,#34D399)}}
+.ua-body{{flex:1;min-width:0}}
+.ua-name{{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}}
+.ua-msg{{font-size:11px;color:#999;margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.ua-time{{font-size:11px;color:#C0C0C6;flex-shrink:0}}
+.tag-new{{font-size:10px;font-weight:700;padding:2px 8px;border-radius:100px;
+  background:#EDFBF4;color:#1CB47A;flex-shrink:0}}
+
+/* ── AI items ── */
+.ci{{display:flex;gap:10px;align-items:flex-start;padding:8px 0;
+  border-bottom:1px solid #F5F5F5}}
+.ci:last-child{{border-bottom:none}}
+.ci-dot{{width:8px;height:8px;border-radius:50%;margin-top:4px;flex-shrink:0}}
+.ci-body{{flex:1;min-width:0}}
+.ci-name{{font-size:13px;font-weight:600}}
+.ci-desc{{font-size:11px;color:#555;margin-top:3px;padding:3px 8px;border-radius:5px;
+  display:inline-block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.ci-summary{{font-size:12px;color:#444;line-height:1.65;padding:8px 0}}
+
+/* ── Timeline ── */
+.tl-item{{display:flex;gap:10px;padding:7px 0}}
+.tl-left{{display:flex;flex-direction:column;align-items:center;
+  gap:3px;width:44px;flex-shrink:0}}
+.tl-t{{font-size:10px;color:#C0C0C6;white-space:nowrap}}
+.tl-dot-red{{width:7px;height:7px;border-radius:50%;background:#E8393A;flex-shrink:0}}
+.tl-dot-gray{{width:7px;height:7px;border-radius:50%;background:#C7C7CC;flex-shrink:0}}
+.tl-line{{width:1px;background:#E5E5EA;flex:1;min-height:6px}}
 .tl-body{{flex:1;min-width:0}}
 .tl-name{{font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px}}
-.tl-msg{{font-size:12px;color:#999;margin-top:2px;
+.tl-msg{{font-size:11px;color:#999;margin-top:1px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.badge{{background:#E02020;color:#fff;font-size:10px;font-weight:700;
-  padding:1px 5px;border-radius:100px}}
 
-/* ── Right panel ── */
-.panel{{background:#FAFAFA;padding:20px 20px}}
-.panel-section{{margin-bottom:20px}}
-.panel-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
-  color:#bbb;margin-bottom:10px}}
-.panel-card{{background:#fff;border:1px solid #EBEBEB;border-radius:10px;overflow:hidden}}
-
-.r-row{{display:flex;align-items:center;gap:10px;padding:9px 12px;
+/* ── Recent contacts grid ── */
+.nc-item{{display:flex;align-items:center;gap:10px;padding:8px 0;
   border-bottom:1px solid #F5F5F5}}
-.r-row:last-child{{border-bottom:none}}
-.av{{width:30px;height:30px;border-radius:50%;flex-shrink:0;font-size:12px;font-weight:700;
-  display:flex;align-items:center;justify-content:center;color:#fff}}
-.av-g{{background:linear-gradient(135deg,#1CB47A,#30D158)}}
-.av-r{{background:linear-gradient(135deg,#E02020,#FF453A)}}
-.r-body{{flex:1;min-width:0}}
-.r-name{{font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.r-sub{{font-size:11px;color:#999;margin-top:1px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-.r-time{{font-size:11px;color:#bbb;flex-shrink:0}}
-.r-empty{{padding:12px;font-size:12px;color:#bbb;font-style:italic}}
+.nc-item:last-child{{border-bottom:none}}
 
-.tag{{font-size:10px;font-weight:700;padding:2px 7px;border-radius:100px;flex-shrink:0}}
-.tag-g{{background:#EDFBF4;color:#1CB47A}}
-
-.ai-bar{{background:#EEF3FF;border-left:3px solid #1B6EF3;border-radius:6px;
-  padding:9px 12px;font-size:12px;line-height:1.6;color:#1A1A2E;margin-bottom:10px}}
-.ai-row{{display:flex;align-items:flex-start;gap:8px;padding:8px 12px;
-  border-bottom:1px solid #F5F5F5}}
-.ai-row:last-child{{border-bottom:none}}
-.ai-num{{width:20px;height:20px;border-radius:5px;font-size:11px;font-weight:800;
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}}
-
-/* ── Footer ── */
-.footer{{text-align:center;font-size:11px;color:#ccc;padding:12px;
-  border-top:1px solid #EBEBEB;background:#fff}}
+/* ── Badge ── */
+.badge{{background:#E8393A;color:#fff;font-size:10px;font-weight:700;
+  padding:1px 5px;border-radius:100px;margin-left:2px}}
+.footer{{text-align:center;font-size:11px;color:#bbb;padding:14px}}
 </style>
 </head>
 <body>
 
+<!-- Header -->
 <div class="hdr">
-  <div class="hdr-brand">{esc(title)}</div>
-  <div class="hdr-date">{date_str} &nbsp;<span style="font-size:16px;color:#999;font-weight:500">{weekday}</span></div>
-  <div class="hdr-stats">
-    <div class="hs"><span class="hs-n {'red' if unanswered else ''}">{len(unanswered)}</span><span class="hs-l">待回复</span></div>
-    <div class="hs"><span class="hs-n {'green' if new_contacts else ''}">{len(new_contacts)}</span><span class="hs-l">新联系人</span></div>
-    <div class="hs"><span class="hs-n">{len(all_private)}</span><span class="hs-l">个私聊</span></div>
+  <div class="hdr-top">
+    <div><span class="hdr-date">{date_str}</span><span class="hdr-day">{weekday}</span></div>
+    <div class="hdr-time">生成于 {time_str}</div>
   </div>
-  <div class="hdr-time">生成于 {time_str}</div>
+  <div class="hdr-stats">
+    <div class="hs">
+      <span class="hs-n {'clr-red' if ua_count else 'clr-gray'}">{ua_count}</span>
+      <span class="hs-l">待回复</span>
+    </div>
+    <div class="hs-divider"></div>
+    <div class="hs">
+      <span class="hs-n {'clr-green' if nc_count else 'clr-gray'}">{nc_count}</span>
+      <span class="hs-l">新联系人</span>
+    </div>
+    <div class="hs-divider"></div>
+    <div class="hs">
+      <span class="hs-n clr-gray">{len(all_private)}</span>
+      <span class="hs-l">个私聊</span>
+    </div>
+  </div>
 </div>
 
 <div class="page">
 
-  <!-- Left: recent private chat timeline -->
-  <div class="tl">
-    <div class="col-label">最近私聊动态</div>
-    {tl_rows or '<div style="color:#bbb;font-size:13px;padding:20px 0">暂无私聊数据</div>'}
-  </div>
+  {ua_section}
+  {nc_section}
 
-  <!-- Right panel -->
-  <div class="panel">
+  <!-- 2×2 grid -->
+  <div class="grid">
 
-    <div class="panel-section">
-      <div class="panel-label">新添加的人</div>
-      <div class="panel-card">{nc_html}</div>
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-title">AI 核心判断</span>
+        <div class="card-icon icon-green">📊</div>
+      </div>
+      <div class="card-body">{ai_items}</div>
+      <div class="card-ftr">
+        <div class="ftr-dot" style="background:{'#E8393A' if ai_footer=='风险' else '#1CB47A'}"></div>
+        <span class="ftr-label" style="color:{'#E8393A' if ai_footer=='风险' else '#1CB47A'}">{ai_footer}</span>
+      </div>
     </div>
 
-    <div class="panel-section">
-      <div class="panel-label">还没回复</div>
-      <div class="panel-card">{ua_html}</div>
+    <div class="card">
+      <div class="card-hdr">
+        <span class="card-title">时间故事线</span>
+        <div class="card-icon icon-blue">🕐</div>
+      </div>
+      <div class="card-body">{tl_items}</div>
+      <div class="card-ftr">
+        <div class="ftr-dot" style="background:#1B6EF3"></div>
+        <span class="ftr-label" style="color:#1B6EF3">动态</span>
+      </div>
     </div>
 
-    <div class="panel-section">
-      <div class="panel-label">AI 重要消息</div>
-      {ai_summary}
-      <div class="panel-card">{ai_rows}</div>
+    <div class="card" style="grid-column:1/-1">
+      <div class="card-hdr">
+        <span class="card-title">最近新联系人</span>
+        <div class="card-icon icon-green">👥</div>
+      </div>
+      <div class="card-body" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0 24px">{rc_items}</div>
+      <div class="card-ftr">
+        <div class="ftr-dot" style="background:#1CB47A"></div>
+        <span class="ftr-label" style="color:#1CB47A">联系人</span>
+      </div>
     </div>
 
   </div>
 </div>
 
-<div class="footer">wechat-daily-report · {date_str} {time_str}</div>
+<div class="footer">微信日报 · {date_str} {time_str}</div>
 </body>
 </html>"""
 
@@ -546,6 +724,7 @@ def main():
     # 1. New contacts
     print("   查询新添加联系人...")
     new_contacts, max_contact_id = get_new_contacts(state)
+    recent_contacts = get_recent_contacts(20)
 
     # 2. Private sessions
     print("   拉取私聊会话...")
@@ -571,7 +750,7 @@ def main():
 
     # 7. Build & write HTML
     html = build_html(config, new_contacts, unanswered,
-                      all_private, analysis)
+                      all_private, analysis, recent_contacts)
     OUTPUT_FILE.write_text(html, encoding="utf-8")
 
     print(f"\n✅ 报告已生成：{OUTPUT_FILE}")

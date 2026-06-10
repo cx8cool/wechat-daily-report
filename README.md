@@ -1,178 +1,166 @@
-# WeChat Daily Report
+# 微信日报
 
-An AI-powered local HTML briefing tool for teams with high-volume WeChat usage. Reads your local WeChat data, analyzes client conversations with Claude AI, and generates a daily action-oriented report.
+一个本地 AI 日报工具。每天自动读取你的微信私聊数据，用 Claude AI 分析哪些客户最重要，生成一份可在浏览器查看的本地 HTML 日报。
 
-**Built for:** Sales teams, real estate agents, consultants — anyone drowning in WeChat messages and needing to know *what to act on today*.
+**适合人群：** 房产经纪、销售、顾问——任何每天要在大量微信消息里判断轻重缓急的人。
 
----
-
-## What It Does
-
-Every morning, run one command and get a local HTML report with:
-
-- **🆕 New contacts** — people who added you since your last report, flagged for follow-up
-- **🤖 AI client briefing** — which clients can't be missed, who's warming up, today's priorities, tomorrow's prep
-- **🔴 Unanswered private chats** — private conversations waiting for your reply
-- **📊 Priority group summaries** — AI-distilled digest of your key groups
-- **💬 All unread groups** — full unread overview sorted by volume
-
-All data stays on your machine. Nothing is sent to external servers except the AI summary request to Anthropic (optional).
+**数据完全本地。** 微信数据只在你的电脑上读取，不上传到任何服务器。
 
 ---
 
-## Requirements
+## 日报包含什么
 
-| Requirement | Notes |
+| 模块 | 内容 |
 |---|---|
-| macOS | Windows/Linux have limited support |
-| WeChat for Mac | Version ≤ 4.1.9 tested |
-| Python 3.9+ | `python3 --version` to check |
-| [wechat-cli](https://www.npmjs.com/package/@canghe_ai/wechat-cli) | Local WeChat data reader |
-| Anthropic API Key | Optional — for AI summaries |
+| **待回复警示** | 有未读私聊时红色置顶，显示是谁在等你回复 |
+| **AI 核心判断** | 哪些客户必须今天跟进、谁在升温、风险信号 |
+| **时间故事线** | 最近私聊按时间排序，红点 = 对方在等你 |
+| **最近新联系人** | 最近加过的联系人，今日新增有标签 |
 
 ---
 
-## Setup
+## 环境要求
 
-### 1. Install wechat-cli
+| 要求 | 说明 |
+|---|---|
+| macOS | Windows/Linux 暂不支持 |
+| 微信 Mac 版 | 需正在运行 |
+| Python 3.9+ | `python3 --version` 查看 |
+| Node.js | 用于安装 wechat-cli |
+| Anthropic API Key | 可选，用于 AI 分析（[免费申请](https://console.anthropic.com)） |
+
+---
+
+## 快速开始
+
+```bash
+git clone https://github.com/cx8cool/wechat-daily-report.git
+cd wechat-daily-report
+bash setup.sh
+```
+
+`setup.sh` 会全程引导你完成所有配置，包括：
+- 检查并安装依赖
+- 自动检测你的微信 ID
+- 填入 Anthropic API Key
+- 设置每日定时自动生成
+
+---
+
+## 手动配置（跳过向导）
+
+### 1. 安装 wechat-cli
 
 ```bash
 npm install -g @canghe_ai/wechat-cli
+sudo wechat-cli init   # 微信正在运行时执行，只需一次
 ```
 
-Open WeChat on your Mac, then run:
-
-```bash
-sudo wechat-cli init
-```
-
-Verify it works:
-
-```bash
-wechat-cli sessions --limit 3
-```
-
-### 2. Install Python dependencies
+### 2. 安装 Python 依赖
 
 ```bash
 pip3 install -r requirements.txt
 ```
 
-### 3. Configure
+### 3. 创建配置文件
 
 ```bash
 cp config.example.json config.json
 ```
 
-Edit `config.json`:
+编辑 `config.json`：
 
 ```json
 {
-  "self_wxid": "your_wechat_id",
-  "priority_groups": ["销售群", "客户群"],
+  "self_wxid": "你的微信ID",
   "days_back": 1,
   "anthropic_api_key": "sk-ant-...",
   "report_title": "微信日报"
 }
 ```
 
-**Finding your WeChat ID:** Run this command and look at the folder names:
+**找你的微信 ID：**
 
 ```bash
 ls ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/
 ```
 
-The folder modified most recently contains your active account ID.
+最近修改的那个文件夹名就是你的 ID（类似 `wxid_xxx` 或 `qq123_xxx`）。
 
-### 4. (Optional) Enable full message history
-
-For AI analysis of full conversation content (not just last message), run:
+### 4. 生成日报
 
 ```bash
-wxkey bootstrap
-```
-
-This grants wechat-cli permission to decrypt your local message database. Required for the AI client analysis feature.
-
----
-
-## Usage
-
-```bash
-# Generate report and open in browser
 python3 daily_report.py
-
-# Generate only (no browser)
-python3 daily_report.py --no-browser
-
-# Look back 2 days instead of 1
-python3 daily_report.py --days 2
-```
-
-The report is saved to `report.html` in the project folder.
-
-### Automate with cron (macOS)
-
-To run every morning at 8am automatically:
-
-```bash
-crontab -e
-```
-
-Add:
-
-```
-0 8 * * * cd /path/to/wechat-daily-report && python3 daily_report.py
 ```
 
 ---
 
-## How It Works
+## 每日自动生成
 
-WeChat stores your chat data in a local SQLite database on your Mac:
+```bash
+bash schedule.sh        # 默认每天 8:00 生成
+bash schedule.sh 7      # 改为每天 7:00
+bash schedule.sh --uninstall   # 取消
+```
+
+---
+
+## 开启完整 AI 分析
+
+默认 AI 只能看到每个会话的最后一条消息摘要。开启完整对话分析：
+
+```bash
+sudo /Users/你的用户名/.local/share/wechat-cli/wxkey bootstrap
+```
+
+成功后再生成日报，AI 就能分析完整的聊天记录了。
+
+> 注：每次重启微信后需重新运行 `wxkey bootstrap`
+
+---
+
+## 日常使用
+
+```bash
+python3 daily_report.py           # 生成并打开
+python3 daily_report.py --days 2  # 分析最近 2 天
+python3 daily_report.py --no-browser  # 只生成不打开
+```
+
+---
+
+## 配置项说明
+
+| 配置项 | 默认值 | 说明 |
+|---|---|---|
+| `self_wxid` | — | 你的微信 ID（必填） |
+| `days_back` | `1` | 分析最近几天的消息 |
+| `anthropic_api_key` | `""` | Anthropic API Key，留空则不启用 AI |
+| `report_title` | `"微信日报"` | 日报标题 |
+
+---
+
+## 数据安全说明
+
+- 所有微信数据只在本地读取，不上传
+- `config.json`、`report.html`、`.state.json` 已加入 `.gitignore`，不会被 git 追踪
+- 如果不填 `anthropic_api_key`，任何数据都不会离开你的电脑
+
+---
+
+## 工作原理
+
+微信 Mac 版将聊天数据存储在本地 SQLite 数据库里：
 
 ```
 ~/Library/Containers/com.tencent.xinWeChat/Data/
-  Documents/xwechat_files/<your-wxid>/db_storage/
-    contact/contact.db      ← contacts (readable directly)
-    session/session.db      ← session list (readable directly)
-    message/message_0.db    ← message content (encrypted, needs wxkey)
+  Documents/xwechat_files/<你的wxid>/db_storage/
+    contact/contact.db      ← 联系人（无需解密）
+    session/session.db      ← 会话列表（无需解密）
+    message/message_0.db    ← 消息内容（需要 wxkey 解密）
 ```
 
-`wechat-cli` reads this local database — no WeChat servers involved, no network requests for your data.
-
-The AI analysis (Claude API) only receives message text — never your WeChat ID, contacts list, or any metadata.
-
----
-
-## Configuration Reference
-
-| Key | Default | Description |
-|---|---|---|
-| `self_wxid` | — | Your WeChat ID (required) |
-| `priority_groups` | `[]` | Group names for AI-summarized digest |
-| `days_back` | `1` | How many days back to analyze |
-| `anthropic_api_key` | `""` | Anthropic API key for AI features |
-| `report_title` | `"微信日报"` | Title shown in the report header |
-
----
-
-## Roadmap
-
-- [ ] Scheduled auto-run via macOS launchd (no cron needed)
-- [ ] Keyword alerts (flag messages containing specific terms)
-- [ ] Client stage tracking across runs (new → warm → hot → deal)
-- [ ] Windows support
-- [ ] Web UI with live refresh
-
----
-
-## Privacy
-
-- All WeChat data is read locally from your Mac
-- No data is stored on any server
-- If `anthropic_api_key` is empty, no data leaves your machine at all
-- `config.json`, `report.html`, and `.state.json` are gitignored by default
+`wechat-cli` 直接读取本地数据库，不经过微信服务器。AI 分析（Claude）只收到消息文本，不包含你的微信 ID 或联系人列表。
 
 ---
 
