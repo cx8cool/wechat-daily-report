@@ -286,378 +286,101 @@ def trunc(s, n=60):
     return s[:n] + "…" if len(s) > n else s
 
 
-# ── HTML sections ─────────────────────────────────────────────────────────────
+# ── HTML builder ─────────────────────────────────────────────────────────────
 
-def section_new_contacts(new_contacts):
-    if not new_contacts:
-        return ""
-    rows = ""
-    for c in new_contacts[:20]:
-        name = esc(c.get("nick_name") or c.get("alias") or c.get("username", "?"))
-        remark = esc(c.get("remark") or "")
-        rows += f"""
-        <div class="person-row">
-          <div class="avatar new">{name[:1]}</div>
-          <div class="person-info">
-            <div class="person-name">{name}
-              {"<span class='remark'>"+remark+"</span>" if remark else ""}
-            </div>
-            <div class="person-msg">刚刚添加 · 还没打招呼</div>
+def build_html(config, new_contacts, unanswered, all_private, analysis):
+    now      = datetime.now()
+    title    = config.get("report_title", "微信私信日报")
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
+    weekday  = ["周一","周二","周三","周四","周五","周六","周日"][now.weekday()]
+
+    # ── Recent private chats (timeline, sorted by last activity) ─────────
+    recent_private = sorted(
+        [s for s in all_private if s.get("last_timestamp")],
+        key=lambda x: x["last_timestamp"], reverse=True
+    )[:18]
+
+    tl_rows = ""
+    unanswered_ids = {s.get("username") for s in unanswered}
+    for s in recent_private:
+        name    = esc(s.get("display_name") or s.get("username", "?"))
+        msg     = esc(trunc(s.get("summary", ""), 42))
+        t       = fmt_time(s.get("last_timestamp"))
+        cnt     = s.get("unread_count", 0)
+        waiting = s.get("username") in unanswered_ids
+        dot     = "dot-red" if waiting else "dot-gray"
+        cnt_html = f'<span class="badge">{cnt}</span>' if cnt else ""
+        tl_rows += f"""<div class="tl-row">
+          <div class="tl-meta">
+            <span class="tl-time">{t}</span>
+            <span class="{dot}"></span>
           </div>
-          <span class="tag tag-new">新</span>
-        </div>"""
-    return f"""
-    <section>
-      <div class="section-label">🆕 新添加的人 <span class="count-badge">{len(new_contacts)}</span></div>
-      <div class="card">{rows}</div>
-    </section>"""
-
-
-def section_ai_briefing(analysis):
-    if not analysis:
-        return """
-    <section>
-      <div class="section-label">🤖 AI 客户日报</div>
-      <div class="card">
-        <div class="empty">需要填写 Anthropic Key 才能启用 AI 分析</div>
-      </div>
-    </section>"""
-
-    # Summary
-    summary_html = f'<div class="ai-summary">{esc(analysis.get("summary",""))}</div>' if analysis.get("summary") else ""
-
-    # Must follow up
-    must = analysis.get("must_followup", [])
-    must_html = ""
-    for item in must:
-        urgency = item.get("urgency", "medium")
-        badge = '<span class="tag tag-hot">🔥 今天</span>' if urgency == "high" else '<span class="tag tag-warm">⚡ 尽快</span>'
-        must_html += f"""
-        <div class="action-item">
-          <div class="action-header">
-            <span class="action-name">{esc(item.get('name',''))}</span>
-            {badge}
+          <div class="tl-body">
+            <div class="tl-name">{name}{cnt_html}</div>
+            <div class="tl-msg">{msg}</div>
           </div>
-          <div class="action-reason">{esc(item.get('reason',''))}</div>
-          <div class="action-do">→ {esc(item.get('action',''))}</div>
         </div>"""
 
-    # Do not miss
-    dont_miss = analysis.get("do_not_miss", [])
-    dont_miss_html = "".join(
-        f'<span class="kw kw-red">{esc(n)}</span>' for n in dont_miss
-    )
-
-    # Warming up
-    warming = analysis.get("warming_up", [])
-    warming_html = ""
-    for item in warming:
-        warming_html += f"""
-        <div class="warming-row">
-          <span class="warming-name">{esc(item.get('name',''))}</span>
-          <span class="warming-arrow">{esc(item.get('from_stage',''))} → {esc(item.get('to_stage',''))}</span>
-          <span class="warming-signal">{esc(item.get('signal',''))}</span>
+    # ── Right col: new contacts ───────────────────────────────────────────
+    nc_html = ""
+    for c in new_contacts[:6]:
+        name  = esc(c.get("nick_name") or c.get("alias") or c.get("username", "?"))
+        alias = esc(c.get("alias") or "")
+        nc_html += f"""<div class="r-row">
+          <div class="av av-g">{name[:1]}</div>
+          <div class="r-body">
+            <div class="r-name">{name}</div>
+            {"<div class='r-sub'>@"+alias+"</div>" if alias else ""}
+          </div>
+          <span class="tag tag-g">新</span>
         </div>"""
+    if not nc_html:
+        nc_html = '<div class="r-empty">今日暂无新联系人</div>'
 
-    # Todos
-    def todo_list(items):
-        if not items:
-            return "<div class='empty'>暂无</div>"
-        return "".join(f'<div class="todo-item">☐ {esc(t)}</div>' for t in items)
-
-    today_todos = todo_list(analysis.get("todos_today", []))
-    tmr_todos   = todo_list(analysis.get("todos_tomorrow", []))
-
-    return f"""
-    <section>
-      <div class="section-label">🤖 AI 客户日报</div>
-
-      {summary_html}
-
-      {"<div class='subsection-label'>🔴 绝对不能漏</div><div class='kw-row'>" + dont_miss_html + "</div>" if dont_miss else ""}
-
-      {"<div class='subsection-label'>必须今天跟进</div><div class='card'>" + must_html + "</div>" if must_html else ""}
-
-      {"<div class='subsection-label'>客户升温信号</div><div class='card'>" + warming_html + "</div>" if warming_html else ""}
-
-      <div class="todos-grid">
-        <div>
-          <div class="subsection-label">📋 今日待办</div>
-          <div class="card todo-card">{today_todos}</div>
-        </div>
-        <div>
-          <div class="subsection-label">🗓 明日准备</div>
-          <div class="card todo-card">{tmr_todos}</div>
-        </div>
-      </div>
-    </section>"""
-
-
-def section_unanswered(unanswered):
-    if not unanswered:
-        return """
-    <section>
-      <div class="section-label">✅ 私聊全部已回复</div>
-    </section>"""
-    rows = ""
-    for s in unanswered[:30]:
-        name = esc(s.get("display_name") or s.get("username","?"))
-        msg  = esc(trunc(s.get("summary","")))
+    # ── Right col: unanswered ─────────────────────────────────────────────
+    ua_html = ""
+    for s in unanswered[:6]:
+        name = esc(s.get("display_name") or "?")
+        msg  = esc(trunc(s.get("summary", ""), 34))
         t    = fmt_time(s.get("last_timestamp"))
         cnt  = s.get("unread_count", 0)
-        rows += f"""
-        <div class="person-row">
-          <div class="avatar">{name[:1]}</div>
-          <div class="person-info">
-            <div class="person-name">{name}
-              <span class="unread-dot">{cnt}</span>
-            </div>
-            <div class="person-msg">{msg}</div>
+        ua_html += f"""<div class="r-row">
+          <div class="av av-r">{name[:1]}</div>
+          <div class="r-body">
+            <div class="r-name">{name} <span class="badge">{cnt}</span></div>
+            <div class="r-sub">{msg}</div>
           </div>
-          <div class="person-time">{t}</div>
+          <span class="r-time">{t}</span>
         </div>"""
-    return f"""
-    <section>
-      <div class="section-label">🔴 私聊待回复 <span class="count-badge">{len(unanswered)}</span></div>
-      <div class="card">{rows}</div>
-    </section>"""
+    if not ua_html:
+        ua_html = '<div class="r-empty">✓ 全部已回复</div>'
 
-
-def section_groups(config, group_summaries, unread_groups):
-    priority = config.get("priority_groups", [])
-    if not priority:
-        return ""
-
-    unread_map = {s.get("display_name"): s.get("unread_count", 0) for s in unread_groups}
-    cards = ""
-    for g in priority:
-        info = group_summaries.get(g, {})
-        summary_text = esc(info.get("summary",""))
-        keywords     = info.get("keywords", [])
-        unread_count = unread_map.get(g, info.get("unread_count", 0))
-
-        kw_html = "".join(f'<span class="kw">{esc(k)}</span>' for k in keywords)
-        ai_html = (
-            f'<div class="group-summary">{summary_text}</div>'
-            f'<div class="kw-row">{kw_html}</div>'
-            if summary_text else
-            '<div class="empty">需要 wxkey bootstrap + Anthropic Key 启用 AI 摘要</div>'
-        )
-        cards += f"""
-        <div class="card group-card">
-          <div class="group-header">
-            <span class="group-name">{esc(g)}</span>
-            <span class="tag tag-warm">{unread_count} 未读</span>
-          </div>
-          {ai_html}
-        </div>"""
-
-    return f"""
-    <section>
-      <div class="section-label">📊 重点群摘要</div>
-      {cards}
-    </section>"""
-
-
-def section_other_groups(unread_groups, priority_names):
-    others = sorted(
-        [g for g in unread_groups if g.get("display_name") not in priority_names],
-        key=lambda x: x.get("unread_count", 0), reverse=True
-    )
-    if not others:
-        return ""
-    rows = ""
-    for s in others[:50]:
-        name   = esc(s.get("display_name","?"))
-        cnt    = s.get("unread_count", 0)
-        sender = esc(s.get("last_sender_display_name") or "")
-        msg    = esc(trunc(s.get("summary",""), 50))
-        t      = fmt_time(s.get("last_timestamp"))
-        prefix = f"{sender}: " if sender else ""
-        rows += f"""
-        <div class="group-row">
-          <div class="group-row-name">{name}</div>
-          <div class="group-row-msg">{prefix}{msg}</div>
-          <div class="group-row-meta">
-            <span class="tag tag-cnt">{cnt}</span>
-            <span class="group-row-time">{t}</span>
-          </div>
-        </div>"""
-    return f"""
-    <section>
-      <div class="section-label">💬 其他未读群组</div>
-      <div class="card">{rows}</div>
-    </section>"""
-
-
-# ── Full HTML ─────────────────────────────────────────────────────────────────
-
-CSS = """
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-  font-family: -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
-  background: #f2f2f7; color: #1c1c1e; min-height: 100vh;
-}
-
-/* Header */
-.header { background: #1c1c1e; color: #fff; padding: 28px 32px 24px; }
-.header h1 { font-size: 22px; font-weight: 700; letter-spacing: -.3px; }
-.header-meta { font-size: 13px; color: #8e8e93; margin-top: 5px; }
-.header-stats { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
-.stat-chip {
-  font-size: 12px; padding: 4px 12px; border-radius: 100px;
-  background: rgba(255,255,255,.1); color: #ebebf5;
-}
-.stat-chip.red { background: rgba(255,59,48,.25); color: #ff6961; }
-.stat-chip.green { background: rgba(52,199,89,.2); color: #4cd964; }
-
-/* Layout */
-.container { max-width: 880px; margin: 0 auto; padding: 24px 16px 56px; }
-section { margin-bottom: 28px; }
-
-.section-label {
-  font-size: 11.5px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: .7px; color: #8e8e93; margin-bottom: 10px;
-  display: flex; align-items: center; gap: 8px;
-}
-.subsection-label {
-  font-size: 12px; font-weight: 600; color: #636366;
-  margin: 16px 0 8px; letter-spacing: .3px;
-}
-
-.count-badge {
-  background: #ff3b30; color: #fff; font-size: 11px;
-  font-weight: 700; padding: 1px 7px; border-radius: 100px;
-}
-
-/* Cards */
-.card {
-  background: #fff; border-radius: 14px; overflow: hidden;
-  box-shadow: 0 1px 4px rgba(0,0,0,.07);
-}
-.group-card { padding: 16px 18px; margin-bottom: 10px; }
-
-/* Tags */
-.tag {
-  font-size: 11px; font-weight: 600; padding: 2px 9px;
-  border-radius: 100px; white-space: nowrap;
-}
-.tag-new   { background: #e3f9e5; color: #30a14e; }
-.tag-hot   { background: #fff0ee; color: #ff3b30; }
-.tag-warm  { background: #fff8ec; color: #ff9500; }
-.tag-cnt   { background: #ff9500; color: #fff; }
-.kw-red    { background: #fff0ee; color: #ff3b30; }
-
-/* Person rows */
-.person-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 16px; border-bottom: 1px solid #f2f2f7;
-}
-.person-row:last-child { border-bottom: none; }
-
-.avatar {
-  width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
-  background: linear-gradient(135deg,#007aff,#5ac8fa);
-  color: #fff; font-size: 16px; font-weight: 600;
-  display: flex; align-items: center; justify-content: center;
-}
-.avatar.new { background: linear-gradient(135deg,#34c759,#30d158); }
-
-.person-info { flex: 1; min-width: 0; }
-.person-name {
-  font-size: 15px; font-weight: 600;
-  display: flex; align-items: center; gap: 6px;
-}
-.remark { font-size: 11px; color: #8e8e93; font-weight: 400; }
-.unread-dot {
-  font-size: 11px; background: #ff3b30; color: #fff;
-  padding: 1px 6px; border-radius: 100px; font-weight: 700;
-}
-.person-msg { font-size: 13px; color: #8e8e93; margin-top: 2px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.person-time { font-size: 12px; color: #aeaeb2; flex-shrink: 0; }
-
-/* AI briefing */
-.ai-summary {
-  background: #f9f9fb; border-radius: 10px; padding: 14px 16px;
-  font-size: 14px; line-height: 1.7; color: #3a3a3c;
-  margin-bottom: 16px; border-left: 3px solid #007aff;
-}
-
-.action-item {
-  padding: 12px 16px; border-bottom: 1px solid #f2f2f7;
-}
-.action-item:last-child { border-bottom: none; }
-.action-header {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
-}
-.action-name { font-size: 15px; font-weight: 600; }
-.action-reason { font-size: 13px; color: #6c6c70; margin-bottom: 4px; }
-.action-do { font-size: 13px; color: #007aff; }
-
-.warming-row {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 16px; border-bottom: 1px solid #f2f2f7; font-size: 14px;
-}
-.warming-row:last-child { border-bottom: none; }
-.warming-name { font-weight: 600; width: 90px; flex-shrink: 0; }
-.warming-arrow { color: #34c759; font-size: 12px; width: 140px; flex-shrink: 0; }
-.warming-signal { color: #636366; font-size: 13px; }
-
-.todos-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
-@media (max-width: 600px) { .todos-grid { grid-template-columns: 1fr; } }
-.todo-card { padding: 4px 0; }
-.todo-item { padding: 9px 16px; border-bottom: 1px solid #f2f2f7; font-size: 14px; }
-.todo-item:last-child { border-bottom: none; }
-
-/* Keywords */
-.kw-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.kw {
-  font-size: 12px; padding: 3px 10px; background: #f2f2f7;
-  border-radius: 100px; color: #636366;
-}
-
-/* Group rows */
-.group-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.group-name { font-size: 15px; font-weight: 600; }
-.group-summary { font-size: 14px; color: #3a3a3c; line-height: 1.65; margin-bottom: 8px; }
-
-.group-row {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 16px; border-bottom: 1px solid #f2f2f7;
-}
-.group-row:last-child { border-bottom: none; }
-.group-row-name { font-size: 14px; font-weight: 600; width: 150px; flex-shrink: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.group-row-msg { flex: 1; font-size: 13px; color: #8e8e93;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.group-row-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.group-row-time { font-size: 12px; color: #aeaeb2; }
-
-.empty { font-size: 13px; color: #aeaeb2; font-style: italic; padding: 14px 16px; }
-
-.footer { text-align: center; font-size: 12px; color: #c7c7cc; padding: 32px 0 8px; }
-.footer a { color: #c7c7cc; }
-"""
-
-
-def build_html(config, new_contacts, unanswered, unread_groups,
-               group_summaries, analysis):
-    now      = datetime.now()
-    date_str = now.strftime("%Y年%m月%d日 %A")
-    time_str = now.strftime("%H:%M")
-    title    = config.get("report_title", "微信日报")
-
-    stats = []
-    if new_contacts:
-        stats.append(f'<span class="stat-chip green">🆕 {len(new_contacts)} 个新联系人</span>')
-    if unanswered:
-        stats.append(f'<span class="stat-chip red">🔴 {len(unanswered)} 人等回复</span>')
-    stats.append(f'<span class="stat-chip">💬 {len(unread_groups)} 个群有未读</span>')
-    stats_html = "\n".join(stats)
-
-    priority_names = set(config.get("priority_groups", []))
+    # ── Right col: AI important ───────────────────────────────────────────
+    ai_rows = ""
+    if analysis:
+        items = []
+        for x in analysis.get("must_followup", [])[:3]:
+            items.append(("red", x.get("name",""), x.get("reason","") or x.get("action","")))
+        for x in analysis.get("warming_up", [])[:3]:
+            items.append(("blue", x.get("name",""), x.get("signal","")))
+        for i, (color, name, desc) in enumerate(items):
+            c = {"red":"#F03D3D","blue":"#1B6EF3"}.get(color,"#888")
+            bg = {"red":"#FFF0F0","blue":"#EEF3FF"}.get(color,"#F5F5F7")
+            ai_rows += f"""<div class="ai-row">
+              <div class="ai-num" style="color:{c};background:{bg}">{i+1}</div>
+              <div class="r-body">
+                <div class="r-name">{esc(name)}</div>
+                <div class="r-sub">{esc(trunc(desc,38))}</div>
+              </div>
+            </div>"""
+        if analysis.get("summary"):
+            ai_summary = f'<div class="ai-bar">{esc(analysis["summary"])}</div>'
+        else:
+            ai_summary = ""
+    else:
+        ai_rows = '<div class="r-empty">填写 Anthropic Key 启用 AI 分析</div>'
+        ai_summary = ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -665,28 +388,128 @@ def build_html(config, new_contacts, unanswered, unread_groups,
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)}</title>
-<style>{CSS}</style>
+<style>
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;
+  background:#FAFAFA;color:#111;font-size:14px;min-height:100vh}}
+
+/* ── Header ── */
+.hdr{{background:#fff;border-bottom:1px solid #EBEBEB;padding:20px 28px 16px}}
+.hdr-brand{{font-size:11px;font-weight:700;color:#999;letter-spacing:.8px;text-transform:uppercase}}
+.hdr-date{{font-size:24px;font-weight:800;color:#111;line-height:1.1;margin:4px 0}}
+.hdr-stats{{display:flex;gap:20px;margin-top:10px}}
+.hs{{display:flex;align-items:baseline;gap:4px}}
+.hs-n{{font-size:17px;font-weight:800;color:#111}}
+.hs-n.red{{color:#E02020}}
+.hs-n.green{{color:#1CB47A}}
+.hs-l{{font-size:11px;color:#999}}
+.hdr-time{{font-size:11px;color:#bbb;margin-top:8px}}
+
+/* ── Layout ── */
+.page{{display:grid;grid-template-columns:1fr 340px;min-height:calc(100vh - 110px)}}
+@media(max-width:680px){{.page{{grid-template-columns:1fr}}}}
+
+/* ── Left: timeline ── */
+.tl{{padding:20px 24px;border-right:1px solid #EBEBEB;background:#fff}}
+.col-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
+  color:#bbb;margin-bottom:16px}}
+
+.tl-row{{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #F5F5F5}}
+.tl-row:last-child{{border-bottom:none}}
+.tl-meta{{display:flex;flex-direction:column;align-items:center;gap:5px;
+  width:46px;flex-shrink:0;padding-top:2px}}
+.tl-time{{font-size:10px;color:#bbb;white-space:nowrap}}
+.dot-red{{width:7px;height:7px;border-radius:50%;background:#E02020;flex-shrink:0}}
+.dot-gray{{width:7px;height:7px;border-radius:50%;background:#D1D1D6;flex-shrink:0}}
+.tl-body{{flex:1;min-width:0}}
+.tl-name{{font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px}}
+.tl-msg{{font-size:12px;color:#999;margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.badge{{background:#E02020;color:#fff;font-size:10px;font-weight:700;
+  padding:1px 5px;border-radius:100px}}
+
+/* ── Right panel ── */
+.panel{{background:#FAFAFA;padding:20px 20px}}
+.panel-section{{margin-bottom:20px}}
+.panel-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
+  color:#bbb;margin-bottom:10px}}
+.panel-card{{background:#fff;border:1px solid #EBEBEB;border-radius:10px;overflow:hidden}}
+
+.r-row{{display:flex;align-items:center;gap:10px;padding:9px 12px;
+  border-bottom:1px solid #F5F5F5}}
+.r-row:last-child{{border-bottom:none}}
+.av{{width:30px;height:30px;border-radius:50%;flex-shrink:0;font-size:12px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;color:#fff}}
+.av-g{{background:linear-gradient(135deg,#1CB47A,#30D158)}}
+.av-r{{background:linear-gradient(135deg,#E02020,#FF453A)}}
+.r-body{{flex:1;min-width:0}}
+.r-name{{font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.r-sub{{font-size:11px;color:#999;margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.r-time{{font-size:11px;color:#bbb;flex-shrink:0}}
+.r-empty{{padding:12px;font-size:12px;color:#bbb;font-style:italic}}
+
+.tag{{font-size:10px;font-weight:700;padding:2px 7px;border-radius:100px;flex-shrink:0}}
+.tag-g{{background:#EDFBF4;color:#1CB47A}}
+
+.ai-bar{{background:#EEF3FF;border-left:3px solid #1B6EF3;border-radius:6px;
+  padding:9px 12px;font-size:12px;line-height:1.6;color:#1A1A2E;margin-bottom:10px}}
+.ai-row{{display:flex;align-items:flex-start;gap:8px;padding:8px 12px;
+  border-bottom:1px solid #F5F5F5}}
+.ai-row:last-child{{border-bottom:none}}
+.ai-num{{width:20px;height:20px;border-radius:5px;font-size:11px;font-weight:800;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}}
+
+/* ── Footer ── */
+.footer{{text-align:center;font-size:11px;color:#ccc;padding:12px;
+  border-top:1px solid #EBEBEB;background:#fff}}
+</style>
 </head>
 <body>
 
-<div class="header">
-  <h1>🏠 {esc(title)}</h1>
-  <div class="header-meta">{esc(date_str)} &nbsp;·&nbsp; 生成于 {esc(time_str)}</div>
-  <div class="header-stats">{stats_html}</div>
+<div class="hdr">
+  <div class="hdr-brand">{esc(title)}</div>
+  <div class="hdr-date">{date_str} &nbsp;<span style="font-size:16px;color:#999;font-weight:500">{weekday}</span></div>
+  <div class="hdr-stats">
+    <div class="hs"><span class="hs-n {'red' if unanswered else ''}">{len(unanswered)}</span><span class="hs-l">待回复</span></div>
+    <div class="hs"><span class="hs-n {'green' if new_contacts else ''}">{len(new_contacts)}</span><span class="hs-l">新联系人</span></div>
+    <div class="hs"><span class="hs-n">{len(all_private)}</span><span class="hs-l">个私聊</span></div>
+  </div>
+  <div class="hdr-time">生成于 {time_str}</div>
 </div>
 
-<div class="container">
-  {section_new_contacts(new_contacts)}
-  {section_ai_briefing(analysis)}
-  {section_unanswered(unanswered)}
-  {section_groups(config, group_summaries, unread_groups)}
-  {section_other_groups(unread_groups, priority_names)}
+<div class="page">
 
-  <div class="footer">
-    由 <a href="https://github.com/your-username/wechat-daily-report">wechat-daily-report</a> 生成
+  <!-- Left: recent private chat timeline -->
+  <div class="tl">
+    <div class="col-label">最近私聊动态</div>
+    {tl_rows or '<div style="color:#bbb;font-size:13px;padding:20px 0">暂无私聊数据</div>'}
+  </div>
+
+  <!-- Right panel -->
+  <div class="panel">
+
+    <div class="panel-section">
+      <div class="panel-label">新添加的人</div>
+      <div class="panel-card">{nc_html}</div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-label">还没回复</div>
+      <div class="panel-card">{ua_html}</div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-label">AI 重要消息</div>
+      {ai_summary}
+      <div class="panel-card">{ai_rows}</div>
+    </div>
+
   </div>
 </div>
 
+<div class="footer">wechat-daily-report · {date_str} {time_str}</div>
 </body>
 </html>"""
 
@@ -729,15 +552,10 @@ def main():
     all_private = get_private_sessions()
     unanswered  = get_unread_private(all_private)
 
-    # 3. Unread groups
-    print("   拉取未读群组...")
-    unread_groups = get_unread_groups()
-
-    # 4. AI client analysis
+    # 3. AI client analysis
     analysis = None
     if api_key:
         print(f"   AI 分析 {len(all_private)} 个私聊客户...")
-        # Only analyze chats with recent activity
         active = [s for s in all_private
                   if s.get("last_timestamp", 0) > (datetime.now() - timedelta(days=days_back+1)).timestamp()]
         analysis = analyze_clients(active, api_key, days_back)
@@ -746,32 +564,19 @@ def main():
         else:
             print("   ⚠ AI 分析失败（可能是 wxkey 未设置或 API Key 问题）")
 
-    # 5. Priority group summaries
-    group_summaries = {}
-    for g in config.get("priority_groups", []):
-        print(f"   重点群：{g}...")
-        unread_map = {s.get("display_name"): s.get("unread_count",0) for s in unread_groups}
-        group_summaries[g] = {"unread_count": unread_map.get(g, 0), "summary": "", "keywords": []}
-        if api_key:
-            msgs = get_group_messages(g, days_back)
-            if msgs:
-                s, k = summarize_group(msgs, g, api_key)
-                group_summaries[g].update({"summary": s, "keywords": k})
-
-    # 6. Save state
+    # 4. Save state
     state["last_max_contact_id"] = max_contact_id
     state["last_run"] = datetime.now().isoformat()
     save_state(state)
 
     # 7. Build & write HTML
     html = build_html(config, new_contacts, unanswered,
-                      unread_groups, group_summaries, analysis)
+                      all_private, analysis)
     OUTPUT_FILE.write_text(html, encoding="utf-8")
 
     print(f"\n✅ 报告已生成：{OUTPUT_FILE}")
     print(f"   新联系人：{len(new_contacts)} 人")
     print(f"   私聊待回复：{len(unanswered)} 人")
-    print(f"   未读群组：{len(unread_groups)} 个")
     print(f"   AI 分析：{'已完成' if analysis else '未启用（填写 API Key）'}")
 
     if not args.no_browser:
