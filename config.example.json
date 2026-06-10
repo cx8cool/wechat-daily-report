@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this file to config.json and fill in your details",
+
+  "self_wxid": "your_wechat_id_here",
+
+  "priority_groups": [
+    "你的重点群名称1",
+    "你的重点群名称2"
+  ],
+
+  "days_back": 1,
+
+  "anthropic_api_key": "",
+
+  "report_title": "微信日报"
+}
